@@ -37,7 +37,7 @@ function GetComputersFromAPI {
     )
     
     # API
-    $requestURL = 'http://api2.arrow.screennetwork.pl/'
+    $requestURL = '***'
     $requestHeaders = @{'sntoken' = '***'; 'Content-Type' = 'application/json' }
     $requestBody = @"
 {
@@ -74,7 +74,6 @@ function GetComputersFromAPI {
                 lok_id          = $_.lok;
                 placowka        = $_.lok_name.toString();
                 sim             = "NULL";
-                LastCheckResult = 0; # 0 = connected; 1 = not connected
             }
 
             $snList = [array]$snList + (New-Object psobject -Property $hash)
@@ -193,7 +192,6 @@ do {
                             lok_id          = $f.lok_id;
                             placowka        = $f.placowka;
                             sim             = "NULL";
-                            LastCheckResult = 0; # 0 = connected; 1 = not connected
                         }
                 
                         Write-host "Adding $($f.sn) to json"
@@ -291,16 +289,16 @@ do {
 
             if ($excludedList -notcontains $sn) {
                 Write-Output "Checking connection with: $sn, $lok"
+                $q = Psql -request "SELECT last_chk FROM led_connections WHERE lok_id = '$lok_id';"
 
                 if (Test-Connection -ComputerName $snIP -Count 3 -Quiet) {
                     #maszyna pinguje
                     Write-Host "Connected" -ForegroundColor Green
 
-                    if ($serv[$l].LastCheckResult -eq 1) {
+                    if ($q.last_chk -eq 1) {
                         SendSlackMessage -message "*$sn*, $lok - jest znowu polaczony"
+                        Psql -request "UPDATE led_connections SET last_chk = 0 WHERE lok_id = '$lok_id';"
                     }
-
-                    $serv[$l].LastCheckResult = 0
                 }
                 else {
                     #maszyna nie pinguje
@@ -309,22 +307,22 @@ do {
 
                     #ponowne sprawdzenie polaczenia
                     Write-Output "Re-checking connection with: $sn"
+                    $q = Psql -request "SELECT disc_cntr, last_chk FROM led_connections WHERE lok_id = '$lok_id';"
         
                     if (Test-Connection -ComputerName $snIP -Count 3 -Quiet) {
                         #maszyna pinguje
                         Write-Host "Connected" -ForegroundColor Green
 
-                        if ($serv[$l].LastCheckResult -eq 1) {
+                        if ($q.last_chk -eq 1) {
                             SendSlackMessage -message "*$sn*, $lok - jest znowu polaczony"
+                            Psql -request "UPDATE led_connections SET last_chk = 0 WHERE lok_id = '$lok_id';"
                         }
-
-                        $serv[$l].LastCheckResult = 0
                     }
                     else {
                         #maszyna nie pinguje
                         Write-Host "Not connected" -ForegroundColor Red  
-
-                        if ($serv[$l].LastCheckResult -eq 0) {
+                        
+                        if (($q.last_chk -eq 0) -and ($q -ne "error")) {
                             $msg = "*``$sn, $lok- jest niepolaczony!``*"
                             $simNumber = $serv[$l].sim
 
@@ -333,17 +331,10 @@ do {
                             }
 
                             $msg = "$msg`n sim: $simNumber" 
-                            SendSlackMessage -message $msg
-
-                            $cntr = Psql -request "SELECT disc_cntr FROM led_connections WHERE lok_id = '$lok_id';"
-                        
-                            if ($cntr -ne "error") {
-                                $newCntr = $cntr.disc_cntr + 1
-                                $cntr = Psql -request "UPDATE led_connections SET disc_cntr = $newCntr, last_disc = NOW() WHERE lok_id = '$lok_id';"
-                            }
+                            SendSlackMessage -message $msg                
+                            $newCntr = $q.disc_cntr + 1
+                            Psql -request "UPDATE led_connections SET disc_cntr = $newCntr, last_disc = NOW(), last_chk = 1 WHERE lok_id = '$lok_id';"
                         }
-
-                        $serv[$l].LastCheckResult = 1
                     }
                 }
 
@@ -368,9 +359,10 @@ do {
 }  until ($dateNow -gt $startDate)
 
 $finalResult = @()
-$servers | ForEach-Object { 
-    if ($_.LastCheckResult -eq 1) {
-        $finalResult += $_
+$db = Psql -request "SELECT * FROM led_connections;"
+foreach ($r in $db) { 
+    if (($r.last_chk -eq 1) -and ($servers.lok_id -contains $r.lok_id)) {
+        $servers | ? { $_.lok_id -eq $r.lok_id } | % { $finalResult += $_ }
     }
 }
 
