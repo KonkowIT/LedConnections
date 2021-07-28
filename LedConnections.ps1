@@ -143,7 +143,7 @@ do {
     $csvContent = @()
 
     foreach ($c in $csv) {
-        $csvContent = $csvContent + (Import-Csv -Path $c -Delimiter ';' | Select-Object 'ID', 'Restart_SMS')
+        $csvContent = $csvContent + (Import-Csv -Path $c -Delimiter ';' -Encoding UTF8 | Select-Object 'ID', 'Restart_SMS')
     }
 
     if (Test-Path $jsonPath) { 
@@ -237,7 +237,6 @@ do {
             $sn = $serv[$l].sn
             $snIP = $serv[$l].ip
             $lok = $serv[$l].placowka
-            $lok_id = $serv[$l].lok_id
 
             Function SendSlackMessage {
                 param (
@@ -283,13 +282,13 @@ do {
 
             $db = Psql -request "SELECT * FROM led_connections;"
             
-            if ((!($db.lok_id -contains $lok_id)) -and $db -ne "error") {
-                Psql -request "INSERT INTO led_connections (led_name, lok_id) VALUES ('$lok', '$lok_id');"
+            if ((!($db.sn -contains $sn)) -and $db -ne "error") {
+                Psql -request "INSERT INTO led_connections (led_name, sn) VALUES ('$lok', '$sn');"
             }
 
             if ($excludedList -notcontains $sn) {
                 Write-Output "Checking connection with: $sn, $lok"
-                $q = Psql -request "SELECT last_chk FROM led_connections WHERE lok_id = '$lok_id';"
+                $q = Psql -request "SELECT last_chk FROM led_connections WHERE sn = '$sn';"
 
                 if (Test-Connection -ComputerName $snIP -Count 3 -Quiet) {
                     #maszyna pinguje
@@ -297,7 +296,7 @@ do {
 
                     if ($q.last_chk -eq 1) {
                         SendSlackMessage -message "*$sn*, $lok - jest znowu polaczony"
-                        Psql -request "UPDATE led_connections SET last_chk = 0 WHERE lok_id = '$lok_id';"
+                        Psql -request "UPDATE led_connections SET last_chk = 0 WHERE sn = '$sn';"
                     }
                 }
                 else {
@@ -307,7 +306,7 @@ do {
 
                     #ponowne sprawdzenie polaczenia
                     Write-Output "Re-checking connection with: $sn"
-                    $q = Psql -request "SELECT disc_cntr, last_chk FROM led_connections WHERE lok_id = '$lok_id';"
+                    $q = Psql -request "SELECT disc_cntr, last_chk FROM led_connections WHERE sn = '$sn';"
         
                     if (Test-Connection -ComputerName $snIP -Count 3 -Quiet) {
                         #maszyna pinguje
@@ -315,7 +314,7 @@ do {
 
                         if ($q.last_chk -eq 1) {
                             SendSlackMessage -message "*$sn*, $lok - jest znowu polaczony"
-                            Psql -request "UPDATE led_connections SET last_chk = 0 WHERE lok_id = '$lok_id';"
+                            Psql -request "UPDATE led_connections SET last_chk = 0 WHERE sn = '$sn';"
                         }
                     }
                     else {
@@ -333,7 +332,7 @@ do {
                             $msg = "$msg`n sim: $simNumber" 
                             SendSlackMessage -message $msg                
                             $newCntr = $q.disc_cntr + 1
-                            Psql -request "UPDATE led_connections SET disc_cntr = $newCntr, last_disc = NOW(), last_chk = 1 WHERE lok_id = '$lok_id';"
+                            Psql -request "UPDATE led_connections SET disc_cntr = $newCntr, last_disc = NOW(), last_chk = 1 WHERE sn = '$sn';"
                         }
                     }
                 }
@@ -361,8 +360,8 @@ do {
 $finalResult = @()
 $db = Psql -request "SELECT * FROM led_connections;"
 foreach ($r in $db) { 
-    if (($r.last_chk -eq 1) -and ($servers.lok_id -contains $r.lok_id)) {
-        $servers | ? { $_.lok_id -eq $r.lok_id } | % { $finalResult += $_ }
+    if (($r.last_chk -eq 1) -and ($servers.sn -contains $r.sn)) {
+        $servers | ? { $_.sn -eq $r.sn } | % { $finalResult += $_ }
     }
 }
 
