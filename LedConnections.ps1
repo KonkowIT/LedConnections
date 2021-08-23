@@ -1,13 +1,12 @@
 $host.UI.RawUI.WindowTitle = "LedConnections"
-$OutputEncoding = [System.Console]::OutputEncoding = [System.Console]::InputEncoding = [System.Text.Encoding]::UTF8
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 
-$homeDir = "C:\SN_Scripts\LedConnections"
-$jsonPath = "$homeDir\sn_data.json"
 $startDate = get-date -DisplayHint date -Format dd/MM/yyyy
 $mtd = "C:\Metadane_do_skryptow"
+$updt = @()
 
 $excludedList = @()
+$database = $null
 
 $csv = @(
     "$mtd\meta_premium.csv",
@@ -23,7 +22,6 @@ Function SendSlackMessage {
 
     $token = "***"
     $send = (Send-SlackMessage -Token $token -Channel 'led_connections' -Text $message).ok
-    #$send = (Send-SlackMessage -Token $token -Channel 'testowanko' -Text $message).ok
     ( -join ("Wiadomosc wyslana: ", $send))
 }
 
@@ -37,7 +35,7 @@ function GetComputersFromAPI {
     )
     
     # API
-    $requestURL = '***'
+    $requestURL = 'http://api2.***.pl/ssh/filter'
     $requestHeaders = @{'sntoken' = '***'; 'Content-Type' = 'application/json' }
     $requestBody = @"
 {
@@ -69,11 +67,11 @@ function GetComputersFromAPI {
     $requestContent | ForEach-Object {
         if ((!($dontCheck -match $_.name)) -and ($_.lok -ne "LOK0014")) {
             $hash = [ordered]@{
-                sn              = $_.name;
-                ip              = $_.ip;
-                lok_id          = $_.lok;
-                placowka        = $_.lok_name.toString();
-                sim             = "NULL";
+                sn       = $_.name;
+                ip       = $_.ip;
+                lok_id   = $_.lok;
+                placowka = $_.lok_name.toString();
+                sim      = "NULL";
             }
 
             $snList = [array]$snList + (New-Object psobject -Property $hash)
@@ -95,34 +93,49 @@ function Start-SleepTimer($seconds) {
     Write-Progress -activity "Start-sleep" -Status "Nastepne sprawdzenie polaczen za" -SecondsRemaining 0 -Completed
 }
 
-function Psql {
+function sql {
     param (
-        $request
+      $request,
+      [switch] $select,
+      [switch] $ins_upd
     )
-
-    $psqlServer = "localhost"
-    $psqlPort = 5432
-    $psqlDB = "***"
-    $psqlUid = "***"
-    $psqlPass = "***"
-
+  
+    $server = "10.10.10.10"
+    $port = 3306
+    $user = "***"
+    $database = "***"
+    $pswd = "***"
+  
+    [void][System.Reflection.Assembly]::LoadFrom("C:\Program Files (x86)\MySQL\MySQL Connector Net 8.0.26\Assemblies\v4.5.2\MySql.Data.dll")
+  
     try {
-        $DBConnectionString = "Driver={PostgreSQL UNICODE(x64)};Server=$psqlServer;Port=$psqlPort;Database=$psqlDB;Uid=$psqlUid;Pwd=$psqlPass;ConnSettings=SET CLIENT_ENCODING TO 'WIN1250';"
-        $DBConn = New-Object System.Data.Odbc.OdbcConnection;
-        $DBConn.ConnectionString = $DBConnectionString;
-        $DBConn.Open();
-        $DBCmd = $DBConn.CreateCommand();
-        $DBCmd.CommandText = $request;
-        $rdr = $DBCmd.ExecuteReader()
-        $tbl = New-Object Data.DataTable
-        $tbl.Load($rdr)
-        $rdr.Close()
+      $connection = New-Object MySql.Data.MySqlClient.MySqlConnection
+      $command = New-Object MySql.Data.MySqlClient.MySqlCommand
+      $connection.ConnectionString = "server=$server;user id=$user;password=$pswd;database=$database;port=$port;pooling=false;connectionTimeout=120;"
+      $connection.Open()
+      $command.Connection = $connection
+      foreach ($r in $request) {
+        if (($null -ne $r) -or ($r -ne "")){
+          $command.CommandText = "$r"
+          if ($select) {
+            $rdr = $command.ExecuteReader()
+            $tbl = New-Object Data.DataTable
+            $tbl.Load($rdr)
+            $rdr.Close()
+          }
+          elseif ($ins_upd) {
+            $command.ExecuteNonQuery() | out-null
+          }
+        }
+      }
+  
+      $connection.Close()
     }
     catch {
-        Write-host "Error while connecting to database: $($_.exception.message)" -ForegroundColor Red
-        $tbl = "error"
+      Write-host "Error while sending request to database: $($_.exception.message)" -ForegroundColor Red
+      $tbl =  0
     }
-
+  
     return $tbl
 }
 
@@ -132,7 +145,7 @@ Get-Content "$mtd\sn_disabled_LedConnections.txt" -ErrorAction SilentlyContinue 
     }
 }
 
-while (!(Test-Connection -ComputerName "10.99.99.10" -Count 3 -Quiet)) {
+while (!(Test-Connection -ComputerName "10.99.99.1" -Count 3 -Quiet)) {
     Write-Host "VPN not connected!" -ForegroundColor Red
     Start-Sleep -Seconds 30
 }
@@ -146,87 +159,58 @@ do {
         $csvContent = $csvContent + (Import-Csv -Path $c -Delimiter ';' -Encoding UTF8 | Select-Object 'ID', 'Restart_SMS')
     }
 
-    if (Test-Path $jsonPath) { 
-        try { 
-            [System.Collections.ArrayList]$localData = ConvertFrom-Json (Get-Content $jsonPath -Raw -ea Continue) -ea Continue 
-            $runUpdate = $true
-        }
-        catch {
-            Write-Host "ERROR: $($_.Exception.message)" 
-        }
-    }
-    else {
-        ConvertTo-Json -InputObject $freshData | Out-File $jsonPath
-        $runUpdate = $false
-    }
+    $database = sql -select -request "SELECT * FROM led_connections;"
 
-    # JSON UPDATE
-    if ($runUpdate) {
-        foreach ($f in $freshData) {
-            $counter = 0
-            $ldCount = $localData.Count
-            For ($i = 0; $i -lt $ldCount; $i++) {
-                if ($f.sn -eq $localData[$i].sn) {
-                    # IP update
-                    if (($f.ip -ne $localData[$i].ip) -and ($f.ip -ne "NULL") -and ($f.ip -ne "")) {
-                        $localData[$i].ip = $f.ip
-                    }
-
-                    # LOK_ID update
-                    if (($f.lok_id -ne $localData[$i].lok_id) -and ($f.lok_id -ne "null") -and ($f.lok_id -ne "")) {
-                        $localData[$i].lok_id = $f.lok_id
-                    }
-
-                    # PLACOWKA update
-                    if (($f.placowka -ne $localData[$i].placowka) -and ($f.placowka -ne "null") -and ($f.placowka -ne "")) {
-                        $localData[$i].placowka = $f.placowka
-                    }
-                }
-                else {
-                    $counter++
-                    if ($counter -eq $ldCount) {
-                        # ADD NEW SN
-                        $hash = [ordered]@{
-                            sn              = $f.sn;
-                            ip              = $f.ip;
-                            lok_id          = $f.lok_id;
-                            placowka        = $f.placowka;
-                            sim             = "NULL";
-                        }
-                
-                        Write-host "Adding $($f.sn) to json"
-                        $localData = [array]$localData + (New-Object psobject -Property $hash)
-                    }
-                }
-            }
-        }
-
-        for ($l = 0; $l -lt $localData.count; $l++) {
-            $n = $localData[$l].sn
-        
-            # REMOVE MISSING SN
-            if (!($freshData.sn -contains $n)) {
-                Write-host "Removing $n from json"
-                $localData.Remove($localData[$l])
+    # UPDATE
+    foreach ($f in $freshData) {
+        if ($database.sn -contains $f.sn) {
+            $d = $database | ? { $_.sn -eq $f.sn }
+            # IP 
+            if (($f.ip -ne $d.ip) -and ($f.ip -ne "NULL") -and ($f.ip -ne "")) {
+                "Updating IP of '$($d.sn)'"
+                [array]$updt += "UPDATE led_connections SET ip = '$($f.ip)' WHERE sn = '$($f.sn)'"
             }
 
-            # SIM NUMBER UPDATE
-            if ($csvContent.ID -contains $localData[$l].lok_id) {
-                $simNumber = ($csvContent | Where-Object { $_.ID -eq $localData[$l].lok_id }).Restart_SMS
-            
-                if (($simNumber -eq "N/A") -or ($simNumber -eq "") -or ($null -eq $simNumber)) {
-                    $localData[$l].sim = "null"
-                }
-                else {
-                    $localData[$l].sim = $simNumber
-                }
+            # LOK_ID 
+            if (($f.lok_id -ne $d.lok_id) -and ($f.lok_id -ne "null") -and ($f.lok_id -ne "")) {
+                "Updating LOK_ID of '$($d.sn)'"
+                [array]$updt += "UPDATE led_connections SET lok_id = '$($f.lok_id)' WHERE sn = '$($f.sn)'"
+            }
+
+            # PLACOWKA 
+            if (($f.placowka -ne $d.led_name) -and ($f.placowka -ne "null") -and ($f.placowka -ne "")) {
+                "Updating LED_NAME of '$($d.sn)'"
+                [array]$updt += "UPDATE led_connections SET placowka = '$($f.placowka)' WHERE sn = '$($f.sn)'"
             }
         }
-
-        ConvertTo-Json -InputObject $localData | Out-File $jsonPath -Force
+        else {
+            # ADD NEW SN
+            "Inserting record '$($f.sn)'"
+            [array]$updt += "INSERT INTO led_connections (led_name, sn, ip, lok_id) VALUES ('$($f.placowka)', '$($f.sn)', '$($f.ip)', '$($f.lok_id)');"
+        }
     }
 
-    [System.Collections.ArrayList]$servers = ConvertFrom-Json (Get-Content $jsonPath -Raw -ea Continue) -ea Continue
+    foreach ($b in $database) {
+        if ($freshData.sn -contains $b.sn) {
+            # UPDATE SIM 
+            $simNumber = ($csvContent | Where-Object { $_.ID -eq $b.lok_id }).Restart_SMS
+            if (($simNumber -ne $b.sim) -and ($simNumber -ne "N/A") -and ($simNumber -ne "") -and ($null -ne $simNumber)) {
+                "Updating SIM of '$($b.sn)'"
+                [array]$updt += "UPDATE led_connections SET sim = '$simNumber' WHERE sn = '$($b.sn)'"
+            }
+        } 
+        else {
+            "Deleting record '$($b.sn)'"
+            [array]$updt += "DELETE FROM led_connections WHERE sn = '$($b.sn)';"
+        }
+    }
+
+    # UPLOAD TO DATABASE
+    if ($null -ne $updt) {
+        sql -ins_upd -request $updt
+    }
+
+    $servers = sql -sel -request "SELECT * FROM led_connections;"
     
     for ($i = 0; $i -lt $servers.Count; $i++) {
         $scriptBlock = {
@@ -236,7 +220,7 @@ do {
             $l = $args[1]
             $sn = $serv[$l].sn
             $snIP = $serv[$l].ip
-            $lok = $serv[$l].placowka
+            $lok = $serv[$l].led_name
 
             Function SendSlackMessage {
                 param (
@@ -245,50 +229,64 @@ do {
             
                 $token = "***"
                 $send = (Send-SlackMessage -Token $token -Channel 'led_connections' -Text $message).ok
-                #$send = (Send-SlackMessage -Token $token -Channel 'testowanko' -Text $message).ok
                 ( -join ("Wiadomosc wyslana: ", $send))
             }
 
-            function Psql {
+            function sql {
                 param (
-                    $request
+                  $request,
+                  [switch] $select,
+                  [switch] $ins_upd
                 )
-            
-                $psqlServer = "localhost"
-                $psqlPort = 5432
-                $psqlDB = "***"
-                $psqlUid = "***"
-                $psqlPass = "***"
-            
+              
+                $server = "10.10.10.10"
+                $port = 3306
+                $user = "***"
+                $database = "***"
+                $pswd = "***"
+              
+                [void][System.Reflection.Assembly]::LoadFrom("C:\Program Files (x86)\MySQL\MySQL Connector Net 8.0.26\Assemblies\v4.5.2\MySql.Data.dll")
+              
                 try {
-                    $DBConnectionString = "Driver={PostgreSQL UNICODE(x64)};Server=$psqlServer;Port=$psqlPort;Database=$psqlDB;Uid=$psqlUid;Pwd=$psqlPass;ConnSettings=SET CLIENT_ENCODING TO 'WIN1250';"
-                    $DBConn = New-Object System.Data.Odbc.OdbcConnection;
-                    $DBConn.ConnectionString = $DBConnectionString;
-                    $DBConn.Open();
-                    $DBCmd = $DBConn.CreateCommand();
-                    $DBCmd.CommandText = $request;
-                    $rdr = $DBCmd.ExecuteReader()
-                    $tbl = New-Object Data.DataTable
-                    $tbl.Load($rdr)
-                    $rdr.Close()
+                  $connection = New-Object MySql.Data.MySqlClient.MySqlConnection
+                  $command = New-Object MySql.Data.MySqlClient.MySqlCommand
+                  $connection.ConnectionString = "server=$server;user id=$user;password=$pswd;database=$database;port=$port;pooling=false;connectionTimeout=120;"
+                  $connection.Open()
+                  $command.Connection = $connection
+                  foreach ($r in $request) {
+                    if (($null -ne $r) -or ($r -ne "")){
+                      $command.CommandText = "$r"
+                      if ($select) {
+                        $rdr = $command.ExecuteReader()
+                        $tbl = New-Object Data.DataTable
+                        $tbl.Load($rdr)
+                        $rdr.Close()
+                      }
+                      elseif ($ins_upd) {
+                        $command.ExecuteNonQuery() | out-null
+                      }
+                    }
+                  }
+              
+                  $connection.Close()
                 }
                 catch {
-                    Write-host "Error while connecting to database: $($_.exception.message)" -ForegroundColor Red
-                    $tbl = "error"
+                  Write-host "Error while sending request to database: $($_.exception.message)" -ForegroundColor Red
+                  $tbl =  0
                 }
-            
+              
                 return $tbl
             }
 
-            $db = Psql -request "SELECT * FROM led_connections;"
+            $db = sql -select -request "SELECT * FROM led_connections;"
             
             if ((!($db.sn -contains $sn)) -and $db -ne "error") {
-                Psql -request "INSERT INTO led_connections (led_name, sn) VALUES ('$lok', '$sn');"
+                sql -ins_upd -request "INSERT INTO led_connections (led_name, sn) VALUES ('$lok', '$sn');"
             }
 
             if ($excludedList -notcontains $sn) {
                 Write-Output "Checking connection with: $sn, $lok"
-                $q = Psql -request "SELECT last_chk FROM led_connections WHERE sn = '$sn';"
+                $q = sql -select -request "SELECT last_chk FROM led_connections WHERE sn = '$sn';"
 
                 if (Test-Connection -ComputerName $snIP -Count 3 -Quiet) {
                     #maszyna pinguje
@@ -296,7 +294,7 @@ do {
 
                     if ($q.last_chk -eq 1) {
                         SendSlackMessage -message "*$sn*, $lok - jest znowu polaczony"
-                        Psql -request "UPDATE led_connections SET last_chk = 0 WHERE sn = '$sn';"
+                        sql -ins_upd -request "UPDATE led_connections SET last_chk = 0 WHERE sn = '$sn';"
                     }
                 }
                 else {
@@ -306,7 +304,7 @@ do {
 
                     #ponowne sprawdzenie polaczenia
                     Write-Output "Re-checking connection with: $sn"
-                    $q = Psql -request "SELECT disc_cntr, last_chk FROM led_connections WHERE sn = '$sn';"
+                    $q = sql -select -request "SELECT disc_cntr, last_chk FROM led_connections WHERE sn = '$sn';"
         
                     if (Test-Connection -ComputerName $snIP -Count 3 -Quiet) {
                         #maszyna pinguje
@@ -314,7 +312,7 @@ do {
 
                         if ($q.last_chk -eq 1) {
                             SendSlackMessage -message "*$sn*, $lok - jest znowu polaczony"
-                            Psql -request "UPDATE led_connections SET last_chk = 0 WHERE sn = '$sn';"
+                            sql -ins_upd -request "UPDATE led_connections SET last_chk = 0 WHERE sn = '$sn';"
                         }
                     }
                     else {
@@ -332,7 +330,7 @@ do {
                             $msg = "$msg`n sim: $simNumber" 
                             SendSlackMessage -message $msg                
                             $newCntr = $q.disc_cntr + 1
-                            Psql -request "UPDATE led_connections SET disc_cntr = $newCntr, last_disc = NOW(), last_chk = 1 WHERE sn = '$sn';"
+                            sql -ins_upd -request "UPDATE led_connections SET disc_cntr = $newCntr, last_disc = NOW(), last_chk = 1 WHERE sn = '$sn';"
                         }
                     }
                 }
@@ -353,15 +351,14 @@ do {
     # Remove all jobs
     Get-Job | Remove-Job
 
-    ConvertTo-Json -InputObject $servers | Out-File $jsonPath -Force
     Start-SleepTimer 180
 }  until ($dateNow -gt $startDate)
 
 $finalResult = @()
-$db = Psql -request "SELECT * FROM led_connections;"
+$db = sql -select -request "SELECT * FROM led_connections;"
 foreach ($r in $db) { 
-    if (($r.last_chk -eq 1) -and ($servers.sn -contains $r.sn)) {
-        $servers | ? { $_.sn -eq $r.sn } | % { $finalResult += $_ }
+    if ($r.last_chk -eq 1) {
+        $finalResult += $r 
     }
 }
 
@@ -369,12 +366,22 @@ if ($finalResult.count -ne 0) {
     $msg = "*Niepolaczone komputery na koniec dnia - $($startDate)* ``````` - SN - LOKALIZACJA -`n**********************`n"
 
     foreach ($result in $finalResult) {
-        $msg += ( -join ($result.sn, " - ", $result.placowka, "`n"))
+        $msg += ( -join ($result.sn, " - ", $result.led_name, "`n"))
     }
 
-    $msg += "``````` "
-    SendSlackMessage -message $msg
+    $msg += "``````` " 
 }
 else {
-    SendSlackMessage -message "*Brak niepolaczonych komputerow - $($startDate)*"
+    $msg = "*Brak niepolaczonych komputerow - $($startDate)* `n"
 }
+
+$mostDscntd = $db | sort -Property disc_cntr -Descending | select -First 3
+$msg += "`n *Najwiecej rozlaczen*`n``````` - SN - LOKALIZACJA - [ ILOSC_ROZLACZEN ] - `n******************************************** `n"
+
+foreach ($dsc in $mostDscntd) {
+    $msg += "$($dsc.sn) - $($dsc.led_name) - [ $($dsc.disc_cntr) ] `n"
+}
+
+$msg += "``````` "
+
+SendSlackMessage -message $msg
