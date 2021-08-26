@@ -363,10 +363,10 @@ foreach ($r in $db) {
 }
 
 if ($finalResult.count -ne 0) {
-    $msg = "*Niepolaczone komputery na koniec dnia - $($startDate)* ``````` - SN - LOKALIZACJA -`n**********************`n"
+    $msg = "*Niepolaczone komputery na koniec dnia - $($startDate)* ``````` - SN - LOKALIZACJA - ROZLACZONE_OD -`n************************************** `n"
 
     foreach ($result in $finalResult) {
-        $msg += ( -join ($result.sn, " - ", $result.led_name, "`n"))
+        $msg += ( -join ($result.sn, " - ", $result.led_name, " - ", $result.last_disc, "`n"))
     }
 
     $msg += "``````` " 
